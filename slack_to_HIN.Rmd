@@ -1,0 +1,382 @@
+---
+title: "Slack Data to HIN Format"
+output: html_notebook
+---
+
+The objective to convert the data export from a Slack workspace to a Heterogenous Information Network (HIN) format.
+
+The data export is a series of JSON files. Here functions are presented to process them and create the HIN.
+
+Format Description: [To be modified with new insights]
+
+1. Entities (Nodes):
+  a. Users
+  b. Channels
+  c. Posts/Messages
+  
+2. Relations (Edges):
+  a. Users - Channel: "has_joined", "has_created", "has_pinned", "created_topic", "created_purpose" [Done]
+  b. Users - Post: "replied_to", "reacted_to", "has_created" [Done]
+  c. Users - Users: "has_mentioned" [Done]
+  d. Posts - Channel: "belongs_to" [Done]
+  e. Posts - User: "is_mentioning" [Done]
+  
+  
+Create a Master Dataframe. This dataframe is of format for each edge (interaction)
+
+Source_ID Source_Type Destination_ID Destination_Type Timestamp Relation  
+  
+```{r setup}
+
+#require("knitr")
+#opts_knit$set(root.dir = '~/metastudy')
+
+
+```
+
+
+```{r}
+
+library("jsonlite")
+library("stringr")
+
+
+path = "OpenCOVID19 Initiative Slack export Mar 2 2020 - Jul 27 2020" # Path to the root folder with the API   extracted Slack data
+folders = list.files(path)
+
+users_json = read_json(path = paste(path,"/users.json", sep = ""))  #Read users metadata file
+channels_json = read_json(path = paste(path,"/channels.json", sep = "")) #Read Channels metadata file
+
+interactions = data.frame() #The Final HIN dataframe
+
+
+
+```
+
+Process Users Data - [Haven't stored email ID/Skype or other info. Would require when mapping b/w Slack and JOGL] **
+
+```{r}
+
+users_df = data.frame()
+
+for (i in 1:length(users_json))
+{
+  email = ""
+  
+  if (length(users_json[[i]]$profile$email)>0)
+  {
+    email = users_json[[i]]$profile$email
+  }
+  
+    if (!users_json[[i]]$deleted)
+  {  
+    invit = users_json[[i]]$is_invited_user
+    invit[is.null(invit)] = F
+    
+    users_df = rbind(users_df, data.frame(id = users_json[[i]]$id, real_name = users_json[[i]]$real_name, timezone  = users_json[[i]]$tz, is_deleted = F, is_admin = users_json[[i]]$is_admin, is_owner = users_json[[i]]$is_owner, is_primary_owner = users_json[[i]]$is_primary_owner, is_restricted = users_json[[i]]$is_restricted, is_ultra_restricted = users_json[[i]]$is_ultra_restricted, is_bot = users_json[[i]]$is_bot, is_app_user = users_json[[i]]$is_app_user, is_invited_user = invit, updated = users_json[[i]]$updated, title = users_json[[i]]$profile$title, image_url = users_json[[i]]$profile$image_512, email = email))
+    }
+  
+  else
+  {
+    users_df = rbind(users_df, data.frame(id = users_json[[i]]$id, real_name = users_json[[i]]$profile$real_name, timezone = "", is_deleted = T, is_admin = "", is_owner = "", is_primary_owner = "", is_restricted = "",  is_ultra_restricted = "", is_bot = users_json[[i]]$is_bot, is_app_user = users_json[[i]]$is_app_user, is_invited_user = "", updated = users_json[[i]]$updated, title = users_json[[i]]$profile$title, image_url = users_json[[i]]$profile$image_512,  email = email))
+  }
+  
+}
+
+```
+
+Process Channel Data & Add user-channel interactions like "has_pinned", "created_topic", "created_purpose" and "created_channel"
+
+```{r}
+channels_df = data.frame()
+pins = data.frame()
+
+for (i in 1:length(channels_json))
+{
+  channels_df = rbind(channels_df, data.frame(id = channels_json[[i]]$id, name = channels_json[[i]]$name, creation = channels_json[[i]]$created, topic = channels_json[[i]]$topic$value, purpose = channels_json[[i]]$purpose$value, is_archived = channels_json[[i]]$is_archived, is_general = channels_json[[i]]$is_general))
+  
+  interactions = rbind(interactions, data.frame(source_id = channels_json[[i]]$creator, source_type = "user", destination_id = channels_json[[i]]$id, destination_type = "channel", timestamp =channels_json[[i]]$created, relation = "has_created"))
+  
+  users = c()
+  
+  for (j in channels_json[[i]]$pins)
+  {
+    users = c(users, j$user)
+    
+    #interactions = rbind(interactions, data.frame(source_id = j$user, source_type = "user", destination_id = channels_json[[i]]$id, destination_type = "channel", timestamp = j$created, relation = "created_pin"))
+    
+    pins = rbind(pins, data.frame(source_id = j$user, id = j$id, timestamp = j$created, channel = channels_json[[i]]$id, type = j$type))
+  }
+  
+  users = toString(users)
+  
+   if (!channels_json[[i]]$topic$value == "")
+  {
+    interactions = rbind(interactions, data.frame(source_id = channels_json[[i]]$topic$creator, source_type = "user", destination_id = channels_json[[i]]$id, destination_type = "channel", timestamp =channels_json[[i]]$topic$last_set, relation = "created_topic"))
+   }
+  
+  if (!channels_json[[i]]$purpose$value == "")
+  {
+     interactions = rbind(interactions, data.frame(source_id = channels_json[[i]]$purpose$creator, source_type = "user", destination_id = channels_json[[i]]$id, destination_type = "channel", timestamp =  channels_json[[i]]$purpose$last_set, relation = "created_purpose"))
+  }
+  
+}
+
+```
+
+
+Process Texts Data
+
+First, some functions to process JSON data
+
+Text mentions: User - User interaction ("has_mentioned") and Post - User ("is_mentioning")
+
+```{r}
+
+process_JSON = function(file_path, folder)
+{
+  content = read_json(path = file_path)
+  interaction = data.frame()
+  posts = data.frame()
+  
+  name = strsplit(strsplit(file_path,"/")[[1]][3], ".json")[[1]]
+  
+      
+    #Deleted/Edited Texts
+    
+    edited = F
+    deleted = F
+    
+    if (length(content[[i]]$edited)>0)
+      edited = T
+    
+    if (!is.null(content[[i]]$subtype))
+    {
+      if (content[[i]]$subtype == "tombstone")
+        deleted = T
+    }
+  
+  for (i in 1:length(content))
+  {
+    
+      #Process attachments and Files
+      
+      files = 0
+      attachments = 0
+      a_list = c()
+      f_list = c()
+      
+      if (length(content[[i]]$attachments)>0)
+      {
+        attachments = length(content[[i]]$attachments)
+        for (j in 1:attachments)
+        {
+          a_list = c(a_list, content[[i]]$attachments[[j]]$original_url)  
+        }
+      }
+      
+      if (length(content[[i]]$files)>0)
+      {
+        files = length(content[[i]]$files)
+        for (j in 1:files)
+        {
+          f_list = c(f_list, content[[i]]$files[[j]]$id)  
+        }
+      }
+      
+      #print(a_list)
+      #print(f_list)
+      
+      posts = rbind(posts, data.frame(id = paste(folder,"_", name,"_", i, sep = ""), text = nchar(content[[i]]$text), timestamp = content[[i]]$ts, is_edited = edited , is_deleted = deleted, files = files, attachments = attachments, a_list = toString(a_list)))
+
+      
+    
+    list = c()
+    
+    if (is.null(content[[i]]$subtype) || content[[i]]$subtype == "tombstone")
+    {
+      
+      #Get Users who are mentioned in text
+      
+      list = c(list, str_extract_all(content[[i]]$text, regex("<@[:alnum:]+>"))[[1]])
+      list = c(list, str_extract_all(content[[i]]$text, regex("<![:alnum:]+>"))[[1]])
+      
+      if(!is.null(content[[i]]$reactions))
+      {
+        
+        #Reacted to a post
+        
+        for(j in 1:length(content[[i]]$reactions))
+        {
+           interaction = rbind(interaction, data.frame(source_id = unlist(content[[i]]$reactions[[j]]$users), source_type = "user", destination_id = paste(folder,"_", name,"_", i, sep = ""), destination_type = "message", timestamp = content[[i]]$ts, relation = "reacted_to"))
+        }
+        
+      }
+      
+      #Created a post
+      
+      interaction = rbind(interaction, data.frame(source_id = content[[i]]$user, source_type = "user", destination_id = paste(folder,"_", name,"_", i, sep = ""), destination_type = "message", timestamp = content[[i]]$ts, relation = "has_created"))
+      
+      #Post belongs to 
+      
+      interaction = rbind(interaction, data.frame(source_id = paste(folder,"_", name,"_", i, sep = ""), source_type = "message", destination_id = channels_df$id[channels_df$name == folder], destination_type = "channel", timestamp = content[[i]]$ts, relation = "belongs_to"))
+      
+      #User pinned a message
+        
+        if (content[[i]]$ts %in% pins$id) #If Pin is a message
+        {
+          interaction = rbind(interaction, data.frame(source_id = pins$source_id[pins$id == content[[i]]$ts], source_type = "user", destination_id = paste(folder,"_", name,"_", i, sep = ""), destination_type = "message", timestamp = as.character(pins$timestamp[pins$id == content[[i]]$ts]), relation = "has_pinned"))
+        }
+      
+        fls = pins$id[pins$id %in% f_list]
+        
+        if (length(fls)>0) #If Pin is a File
+        {
+          
+          for (k in fls)
+          {
+            interaction = rbind(interaction, data.frame(source_id = pins$source_id[pins$id ==  k], source_type = "user", destination_id = paste(folder,"_", name,"_", i, sep = ""), destination_type = "message", timestamp = as.character(pins$timestamp[pins$id == k]), relation = "has_pinned"))
+          }
+          
+        }
+      
+      #Replied messages
+      
+      if (!is.null(content[[i]]$thread_ts) & is.null(content[[i]]$parent_user_id) & !is.null(content[[i]]$reply_count))
+        {
+        
+        #User replied to post - in a chain of replies - the parent message is considered as the message replied to
+        
+          for (j in 1:length(content[[i]]$replies))
+          {
+            interaction = rbind(interaction, data.frame(source_id = content[[i]]$replies[[j]]$user, source_type = "user", destination_id = paste(folder,"_", name,"_", i, sep = ""), destination_type = "message",  timestamp = content[[i]]$replies[[j]]$ts, relation = "replied_to"))
+          }
+      }
+      
+    }
+    
+
+    
+    #print(content[[i]]$subtype)
+
+  
+    
+    for (j in list)
+    {
+        val = str_replace(j,"<","")
+        val = str_replace(val,">","")
+        val = str_replace(val,"@","")
+        val = str_replace(val,"!","")
+        interaction = rbind(interaction, data.frame(source_id = content[[i]]$user, source_type = "user", destination_id = val, destination_type = "user", timestamp = content[[i]]$ts, relation = "has_mentioned"))
+        
+        interaction = rbind(interaction, data.frame(source_id = paste(folder,"_", name,"_", i, sep = ""), source_type = "message", destination_id = val, destination_type = "user", timestamp = content[[i]]$ts, relation = "is_mentioning"))
+        
+    }
+    
+  
+      if (!is.null(content[[i]]$subtype))
+      {
+        if(content[[i]]$subtype == "channel_join")
+        {  
+          #print(content[[i]])
+          interaction = rbind(interaction, data.frame(source_id = content[[i]]$user, source_type = "user", destination_id = channels_df$id[channels_df$name == folder], destination_type = "channel", timestamp = content[[i]]$ts, relation = "has_joined"))
+          
+          if (length(content[[i]]$inviter)>0)
+          {
+            interaction = rbind(interaction, data.frame(source_id = content[[i]]$inviter, source_type = "user", destination_id = content[[i]]$user, destination_type = "user", timestamp = content[[i]]$ts, relation = "has_invited"))
+            
+            interaction = rbind(interaction, data.frame(source_id = content[[i]]$inviter, source_type = "user", destination_id = channels_df$id[channels_df$name == folder], destination_type = "channel", timestamp = content[[i]]$ts, relation = "invited_to"))
+            
+          }
+          
+          
+        }
+        
+        else if(content[[i]]$subtype == "bot_message")
+        {
+          list = str_extract_all(content[[i]]$text, regex("<@[:alnum:]+>"))[[1]]  #Processed for the "GreetBot" in the Workspace
+          
+          for (k in list)
+          {
+            val = str_replace(k,"<","")
+            val = str_replace(val,">","")
+            val = str_replace(val,"@","")
+            val = str_replace(val,"!","")
+            #print(val)
+            interaction = rbind(interaction, data.frame(source_id = val, source_type = "user", destination_id = channels_df$id[channels_df$name == folder], destination_type = "channel", timestamp = content[[i]]$ts, relation = "has_joined"))
+          }
+          
+        }
+          
+      }   
+    
+    
+  }
+  
+  return(list(interaction,posts))
+}
+
+
+```
+
+Call these functions
+
+```{r}
+posts = data.frame()
+
+
+for (i in folders[-grep(".json",folders)])
+{
+    files = list.files(paste(path,"/",i, sep = ""))   
+    
+    for (j in files)
+    {
+        temp = process_JSON(file_path = paste(path,"/",i,"/",j,sep=""), folder = i)
+        interactions = rbind(interactions, temp[[1]])
+        posts = rbind(posts, temp[[2]])
+    }
+    
+}
+
+```
+
+```{r}
+
+write.csv(interactions, "HIN_edges.csv")
+write.csv(users_df, "users.csv")
+write.csv(posts, "posts.csv")
+
+```
+
+Convert to JSON (edges)
+
+```{r}
+colnames(interactions) = c("StartObject","StartGroup","EndObject","EndGroup","timestamp","Relation")
+
+#process as a big composite list
+
+temp = data.frame(timestamp = interactions$timestamp)
+new_int = interactions[,c("Relation","StartGroup", "StartObject", "EndGroup", "EndObject")]
+new_int$Attributes = temp
+
+#l = list(Relation = as.list(interactions$Relation), StartGroup = as.list(interactions$StartGroup), StartObject = as.list(interactions$StartObject), EndGroup = as.list(interactions$EndGroup), EndObject = as.list(interactions$EndObject), Attributes = list(timestamp = as.list(interactions$timestamp)))
+
+#intjson = toJSON(new_int, dataframe = "rows")
+
+write_json(new_int, paste("HIN_edges_","Jul_27_2020",".json"), pretty = T)
+```
+
+Nodes
+
+```{r}
+
+write_json(users_df, paste("Users","Jul_27_2020",".json"), pretty = T)
+write_json(channels_df, paste("Channels","Jul_27_2020",".json"), pretty = T)
+write_json(posts, paste("Posts","Jul_27_2020",".json"), pretty = T)
+
+```
+
+
+*********************************************************************
+
+
