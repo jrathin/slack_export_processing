@@ -1,0 +1,342 @@
+---
+title: "OpenCovid_Slack"
+output: html_notebook
+---
+
+
+Parsing json objects retrieved using Slack API. Objective is to process the data and create dataframes of converstion threads, replies and emoticon responses for network analysis.
+
+
+```{r}
+
+library("jsonlite")
+library("igraph")
+library("visNetwork")
+library("stringr")
+
+
+
+path = "OpenCOVID19 Initiative Slack export Mar 3 2020 - Jan 22 2021" # Path to the root folder with the API   extracted Slack data
+folders = list.files(path)
+  
+users_json = read_json(path = paste(path,"/users.json", sep = ""))
+channels_json = read_json(path = paste(path,"/channels.json", sep = ""))
+
+```
+
+Create Users Dataframe
+
+```{r}
+
+
+users_df = data.frame()
+
+for (i in 1:length(users_json))
+{
+  email = ""
+  
+  if (length(users_json[[i]]$profile$email)>0)
+  {
+    email = users_json[[i]]$profile$email
+  }
+  
+    if (!users_json[[i]]$deleted)
+  {  
+    invit = users_json[[i]]$is_invited_user
+    invit[is.null(invit)] = FALSE
+    
+    users_df = rbind(users_df, data.frame(id = users_json[[i]]$id, real_name = users_json[[i]]$real_name, timezone  = users_json[[i]]$tz, is_deleted = FALSE, is_admin = users_json[[i]]$is_admin, is_owner = users_json[[i]]$is_owner, is_primary_owner = users_json[[i]]$is_primary_owner, is_restricted = users_json[[i]]$is_restricted, is_ultra_restricted = users_json[[i]]$is_ultra_restricted, is_bot = users_json[[i]]$is_bot, is_app_user = users_json[[i]]$is_app_user, is_invited_user = invit, updated = users_json[[i]]$updated, title = users_json[[i]]$profile$title, image_url = users_json[[i]]$profile$image_512, email = email))
+    }
+  
+  else
+  {
+    users_df = rbind(users_df, data.frame(id = users_json[[i]]$id, real_name = users_json[[i]]$profile$real_name, timezone = "", is_deleted = TRUE, is_admin = "", is_owner = "", is_primary_owner = "", is_restricted = "",  is_ultra_restricted = "", is_bot = users_json[[i]]$is_bot, is_app_user = users_json[[i]]$is_app_user, is_invited_user = "", updated = users_json[[i]]$updated, title = users_json[[i]]$profile$title, image_url = users_json[[i]]$profile$image_512,  email = email))
+  }
+  
+}
+
+
+write.csv(users_df, "data_files/users.csv")
+
+```
+
+
+Create Channels Dataframe
+
+```{r}
+
+channels_df = data.frame()
+channels_aux = data.frame()
+
+for (i in 1:length(channels_json))
+{
+  channels_df = rbind(channels_df, data.frame(id = channels_json[[i]]$id, name = channels_json[[i]]$name, created = channels_json[[i]]$created, creator = channels_json[[i]]$creator, is_archived = channels_json[[i]]$is_archived, is_general = channels_json[[i]]$is_general, members = toString(unlist(channels_json[[i]]$members))))
+  
+  users = c()
+  
+  for (j in channels_json[[i]]$pins)
+  {
+    users = c(users, j$user)
+  }
+  
+  users = toString(users)
+  
+  channels_aux = rbind(channels_aux, data.frame(id = channels_json[[i]]$id, topic = channels_json[[i]]$topic$value, topic_creator = channels_json[[i]]$topic$creator, topic_ts = channels_json[[i]]$topic$last_set, purpose = channels_json[[i]]$purpose$value, purpose_creator = channels_json[[i]]$purpose$creator, purpose_ts = channels_json[[i]]$purpose$last_set, pinned = users))
+  
+}
+
+write.csv(channels_df, "data_files/channels.csv")
+write.csv(channels_aux, "data_files/channels_desc.csv")
+
+```
+
+Function to process Slack JSON
+
+
+Construct Network
+
+
+1. Channel - Identify users not in users.json
+
+```{r}
+
+process_Slack_JSON = function(file_path)
+{
+  content = read_json(path = file_path)
+  list = c()
+  users_list = data.frame()
+  
+  for (i in 1:length(content))
+  {
+    
+      if (!is.null(content[[i]]$subtype)) 
+      {
+        var = content[[i]]$subtype
+        #print(var)
+        
+        if (var == "bot_message")
+        {
+          list = c(list,i)
+        }
+      }
+    
+    if (!(i %in% list))
+    {
+      if (!(content[[i]]$user %in% users_df$id))
+      {
+              users_list = rbind(users_list, data.frame(id = content[[i]]$user))
+      }
+    }
+  
+  }
+  
+  #print(list)
+  return(users_list)
+}
+
+```
+
+
+Process texts for mentions
+
+```{r}
+
+process_texts_mentions = function(file_path, folder)
+{
+  content = read_json(path = file_path)
+  df = data.frame()
+  df_list = data.frame()
+  lis = list()
+  
+  for (i in 1:length(content))
+  {
+    
+    list = c()
+    
+    if (is.null(content[[i]]$subtype))
+    {
+      list = c(list, str_extract_all(content[[i]]$text, regex("<@[:alnum:]+>"))[[1]])
+      list = c(list, str_extract_all(content[[i]]$text, regex("<![:alnum:]+>"))[[1]])
+    }
+    
+    #print(str_extract_all(content[[i]]$text, regex("<![:alnum:]+>")))
+    cl_list = list()
+    
+    for (j in list)
+    {
+        val = str_replace(j,"<","")
+        val = str_replace(val,">","")
+        val = str_replace(val,"@","")
+        val = str_replace(val,"!","")
+        cl_list = append(cl_list, val)
+        df = rbind(df, data.frame(from = content[[i]]$user, to = val, timestamp = content[[i]]$ts, channel = folder)) 
+    }
+    #df_list = rbind(df_list, data.frame(from = content[[i]]$user, to = toString(cl_list), timestamp = content[[i]]$ts, channel = folder))
+  }
+  
+ 
+  lis[[1]] = df
+  #lis[[2]] = df_list
+  
+  return(lis)
+}
+
+```
+
+***************
+
+Process text for emoticon responses - texts - and channel joins
+
+```{r}
+process_emoticon_responses = function(file_path,folder)
+{
+  content = read_json(path = file_path)
+  df = data.frame()
+  df1 = data.frame()
+  df2 = data.frame()
+  df3 = data.frame()
+  df_list = list()
+  
+  for (i in 1:length(content))
+  {
+    if (!is.null(content[[i]]$reactions))
+    {
+      for (j in 1:length(content[[i]]$reactions))
+      {
+        if (is.null(content[[i]]$subtype))
+          {#print(content[[i]])
+          df = rbind(df, data.frame(reaction_by = unlist(content[[i]]$reactions[[j]]$users), source_message_from = content[[i]]$user, source_message_timestamp = content[[i]]$ts, reaction_name = content[[i]]$reactions[[j]]$name,  channel = folder))}
+      }
+    }
+    
+    if (is.null(content[[i]]$subtype))
+    {
+        df1 = rbind(df1, data.frame(source_message_from = content[[i]]$user, source_message_timestamp = content[[i]]$ts, message_size = nchar(content[[i]]$text), channel = folder))
+        
+        
+        if (!is.null(content[[i]]$thread_ts) & is.null(content[[i]]$parent_user_id) & !is.null(content[[i]]$reply_count))
+        {
+          df3 = rbind(df3, data.frame(user = content[[i]]$user, thread_timestamp = content[[i]]$thread_ts, reply_count = content[[i]]$reply_count, reply_user_count =  content[[i]]$reply_users_count, channel = folder))
+        }
+    }
+    
+    if (!is.null(content[[i]]$subtype))
+    {
+      if(content[[i]]$subtype == "channel_join")
+        df2 = rbind(df2, data.frame(user = content[[i]]$user, source_message_timestamp = content[[i]]$ts, channel = folder))
+    }
+    
+      
+  }
+  
+  df_list[[1]] = df
+  df_list[[2]] = df1
+  df_list[[3]] = df2
+  df_list[[4]] = df3
+  
+  return(df_list)
+}
+```
+
+Workspace Joins
+
+```{r}
+
+workspace_joins = function(fol_path)
+{
+  files = list.files(fol_path)
+  df = data.frame()
+  
+  for (j in files)
+  {
+    content = read_json(path = paste(fol_path,"/",j,sep=""))
+    #print(paste(fol_path,"/",j,sep=""))
+    #print(j)
+    
+    for (i in 1:length(content))
+    {
+      if (!is.null(content[[i]]$subtype))
+      {
+        if(content[[i]]$subtype == "channel_join")
+        {  
+          df = rbind(df, data.frame(user = content[[i]]$user, timestamp = content[[i]]$ts, mode = "cj"))
+        }
+        
+        else if(content[[i]]$subtype == "bot_message")
+        {
+          list = str_extract_all(content[[i]]$text, regex("<@[:alnum:]+>"))[[1]]  
+          #print(list)
+          
+          
+          for (k in list)
+          {
+            val = str_replace(k,"<","")
+            val = str_replace(val,">","")
+            val = str_replace(val,"@","")
+            val = str_replace(val,"!","")
+            df = rbind(df, data.frame(user = val, timestamp = content[[i]]$ts, mode = "gb")) 
+          }
+          
+        }
+          
+      }
+    }
+  }
+  
+  return(df)
+  
+}
+
+```
+
+
+
+```{r}
+
+df_extra_users = data.frame()
+df_text_mentions = data.frame()
+df_emoticon_responses = data.frame()
+df_texts = data.frame()
+df_channel_join = data.frame()
+df_text_ment_list = data.frame()
+df_threads = data.frame()
+
+df_ws_joins = workspace_joins(paste(path,"/","prgm-introductions", sep = ""))
+
+for (i in folders[-grep(".json",folders)])
+{
+    files = list.files(paste(path,"/",i, sep = ""))   
+    #temp = c()
+    
+    for (j in files)
+    {
+        #df_extra_users = rbind(df_extra_users, process_Slack_JSON(paste(path,"/",i,"/",j,sep="")))
+        temp1 = process_texts_mentions(file_path = paste(path,"/",i,"/",j,sep=""), folder = i)
+        df_text_mentions = rbind(df_text_mentions, temp1[[1]])
+        #df_text_ment_list = rbind(df_text_ment_list, temp1[[2]])
+        temp =  process_emoticon_responses(file_path = paste(path,"/",i,"/",j,sep=""), folder = i)
+        df_emoticon_responses = rbind(df_emoticon_responses, temp[[1]])
+        df_texts = rbind(df_texts, temp[[2]])
+        df_channel_join = rbind(df_channel_join, temp[[3]])
+        df_threads = rbind(df_threads, temp[[4]])
+    }
+    
+}
+
+df_extra_users = unique(df_extra_users)
+
+```
+
+```{r}
+write.csv(df_ws_joins, "data_files/ws_joins.csv")
+#write.csv(df_extra_users, "data_files/extra_users.csv")
+write.csv(df_emoticon_responses, "data_files/emoticon_responses.csv")
+write.csv(df_text_mentions, "data_files/text_mentions.csv")
+write.csv(df_channel_join, "data_files/channel_join.csv")
+write.csv(df_texts, "data_files/texts_channel.csv")
+write.csv(df_threads, "data_files/threads_channel.csv")
+```
+
+*******************************************************************************************
+
+
